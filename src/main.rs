@@ -26,6 +26,9 @@ static NPM: &str = "npm";
 #[cfg(target_os = "windows")]
 static NPM: &str = "npm.cmd";
 
+static VOLTA: &str = "volta";
+static NODE_VERSION: &str = "16";
+
 #[derive(Clone, Serialize, StructOpt)]
 #[structopt(
     name = "boltzmann",
@@ -87,6 +90,9 @@ pub struct Flags {
     #[structopt(long, help = "Enable asset bundling via ESBuild")]
     esbuild: Option<Option<Flipper>>,
 
+    #[structopt(long, help = "Enable node version management via Volta")]
+    volta: Option<Option<Flipper>>,
+
     // Convenient option groups next. These aren't saved individually.
     #[structopt(
         long,
@@ -143,6 +149,11 @@ struct RunScriptSpec {
     versions: Vec<VersionedScript>,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+struct VoltaSpec {
+    node: String,
+}
+
 #[derive(Debug, Default, Deserialize, Serialize)]
 struct PackageJson {
     #[serde(flatten)]
@@ -159,6 +170,9 @@ struct PackageJson {
 
     scripts: Option<serde_json::Map<String, Value>>,
     boltzmann: Option<Settings>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    volta: Option<Option<VoltaSpec>>,
 }
 
 fn load_package_json(flags: &Flags, default_settings: Settings) -> Option<PackageJson> {
@@ -373,7 +387,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error + 'static>> {
     }
 
     let settings = package_json.boltzmann.take().unwrap();
-    let updated_settings = settings.merge_flags(version.clone(), &flags);
+    let updated_settings = settings.merge_flags(version.clone(), NODE_VERSION.to_string(), &flags);
 
     render::scaffold(&mut target, &updated_settings).context("Failed to render Boltzmann files")?;
 
@@ -476,6 +490,13 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error + 'static>> {
     package_json.dev_dependencies.replace(devdeps);
     package_json.boltzmann.replace(updated_settings.clone());
 
+    match updated_settings.volta {
+        Some(true) => (),
+        _ => {
+            package_json.volta.replace(None);
+        },
+    }
+
     // Update package.json run scripts.
     // We manage run scripts that meet the following criteria:
     // - name starts with `boltzman:`, always
@@ -570,6 +591,26 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error + 'static>> {
         .with_context(|| format!("Failed to update {:?}", target))?;
     serde_json::to_writer_pretty(&mut fd, &package_json)?;
     target.pop();
+
+    if let Some(true) = updated_settings.volta {
+        let mut subproc = Exec::cmd(VOLTA).arg("pin").arg(format!("node@{}", NODE_VERSION)).cwd(&target);
+
+        subproc = if verbosity < 2 {
+            subproc.stdout(NullFile).stderr(NullFile)
+        } else {
+            subproc
+        };
+
+        info!("    running volta pin...");
+        let exit_status = subproc.join()?;
+
+        match exit_status {
+            ExitStatus::Exited(0) => {},
+            _ => {
+                return Err(anyhow!("volta pin exited with non-zero status").into());
+            }
+        }
+    };
 
     let mut subproc = Exec::cmd(NPM).arg("i").cwd(&target);
 
