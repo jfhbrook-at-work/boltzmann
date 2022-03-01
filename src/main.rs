@@ -493,7 +493,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error + 'static>> {
     match updated_settings.volta {
         Some(true) => (),
         _ => {
-            package_json.volta.replace(None);
+            package_json.volta = None;
         },
     }
 
