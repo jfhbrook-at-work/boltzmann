@@ -1,6 +1,7 @@
 void `{% if selftest %}`;
 export { handleCORS }
 
+import { beeline, honeycomb, otel } from '../core/honeycomb'
 import { HTTPMethod } from 'find-my-way'
 import isDev from 'are-we-dev'
 
@@ -22,6 +23,17 @@ function handleCORS ({
 
   return (next: Handler) => {
     return async function cors (context: Context) {
+      const spanAttributes = {
+        'boltzmann.http.origin': String(context.headers.origin)
+      }
+      if (honeycomb.features.beeline) {
+        beeline.addContext(spanAttributes)
+      }
+      const span = otel.trace.getSpan(otel.context.active())
+      if (span) {
+        span.setAttributes(spanAttributes)
+      }
+
       if (!includesStar && !originsArray.includes(String(context.headers.origin))) {
         throw Object.assign(new Error('Origin not allowed'), {
           [Symbol.for('status')]: 400
