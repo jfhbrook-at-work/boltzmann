@@ -1,4 +1,5 @@
 void `{% if selftest %}`;
+import { EventEmitter } from 'events'
 import { honeycomb } from '../core/honeycomb'
 import { IncomingMessage, ServerResponse } from 'http'
 import { Accepts } from 'accepts'
@@ -45,6 +46,10 @@ class Context {
   // {% if postgres %}
   public _postgresPool?: PGPool
   public _postgresConnection?: Promise<PGClient>
+  // {% endif %}
+
+  // {% if honeycomb %}
+  public _spanEmitter?: EventEmitter
   // {% endif %}
 
   ;[extensions: string]: any

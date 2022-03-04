@@ -46,6 +46,7 @@ honeycomb middlewares, etc., should still be imported and exported here.
 #}*/
 void `{% if honeycomb %}`;
 import onHeaders from 'on-headers'
+import { EventEmitter } from 'events'
 void `{% endif %}`;
 
 import ships from 'culture-ships'
@@ -142,7 +143,7 @@ export { redis }
 void `{% endif %}`;
 
 void `{% if honeycomb %}`;
-export { onHeaders }
+export { EventEmitter, onHeaders }
 void `{% endif %}`;
 
 void `{% if jwt or oauth %}`;
