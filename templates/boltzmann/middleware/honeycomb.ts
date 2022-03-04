@@ -1,7 +1,8 @@
 void `{% if selftest %}`;
+import { EventEmitter } from 'events'
 import { beeline, honeycomb, otel, otelSemanticConventions } from '../core/honeycomb'
 import assert from 'assert'
-export { trace, honeycombMiddlewareSpans }
+export { trace, startSpan, endSpan }
 import { ServerResponse } from 'http'
 import { Handler } from '../core/middleware'
 import { Context } from '../data/context'
@@ -50,7 +51,7 @@ function trace ({
 // between middlewares in the core buildMiddleware step. It delegates to
 // either a beeline or OpenTelemetry implementation depending on how the
 // honeycomb object is configured.
-function honeycombMiddlewareSpans ({name, doNotTrace}: {name?: string, doNotTrace?: boolean} = {}) {
+function startSpan ({name, doNotTrace}: {name?: string, doNotTrace?: boolean} = {}) {
   if (!honeycomb.features.honeycomb || doNotTrace) {
     return (next: Handler) => (context: Context) => next(context)
   }
@@ -59,7 +60,15 @@ function honeycombMiddlewareSpans ({name, doNotTrace}: {name?: string, doNotTrac
     return beelineMiddlewareSpans({name})
   }
 
-  return otelMiddlewareSpans({name})
+  return startOtelSpan({name})
+}
+
+function endSpan ({name, doNotTrace}: {name?: string, doNotTrace?: boolean} = {}) {
+  if (!honeycomb.features.otel || doNotTrace) {
+    return (next: Handler) => (context: Context) => next(context)
+  }
+
+  return endOtelSpan({name})
 }
 
 // Beeline implementations of trace and span, respectively.
@@ -248,11 +257,12 @@ function otelTrace () {
   }
 }
 
-function otelMiddlewareSpans ({name}: {name?: string} = {}) {
-  return function honeycombSpan (next: Handler) {
+function startOtelSpan ({name}: {name?: string} = {}) {
+  return function startSpan (next: Handler) {
     return async (context: Context) => {
       let traceContext = otel.context.active()
 
+      const emitter = new EventEmitter()
       const span = honeycomb.tracer.startSpan(
         middlewareSpanName(name),
         { kind: otel.SpanKind.SERVER },
@@ -260,13 +270,39 @@ function otelMiddlewareSpans ({name}: {name?: string} = {}) {
       )
       traceContext = otel.trace.setSpan(traceContext, span)
 
-      const result = await otel.context.with(traceContext, () => {
-        return next(context)
+      context._spanEmitter = emitter
+
+      await new Promise((startSpan, _) => {
+        // non-blocking!
+        otel.context.with(traceContext, () => new Promise((closeSpan, _) => {
+          // We're in the context, we should be able to call next
+          startSpan(null)
+          emitter.once('close', () => {
+            // Theoretically we may now safely exit the context
+            closeSpan(null)
+          })
+        })).then(
+          () => {
+            span.end()
+          },
+          (err: Error) => {
+            otel.diag.error(String(err.stack))
+          }
+        )
       })
 
-      span.end()
+      return next(context)
+    }
+  }
+}
 
-      return result
+function endOtelSpan ({} = {}) {
+  return function endSpan (next: Handler) {
+    return async (context: Context) => {
+      if (context._spanEmitter) {
+        context._spanEmitter.emit('close')
+      }
+      return next(context)
     }
   }
 }

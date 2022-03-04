@@ -5,7 +5,7 @@ import { HttpMetadata } from '../core/prelude'
 import { HTTPMethod } from 'find-my-way'
 import isDev from 'are-we-dev'
 import { enforceInvariants } from '../middleware/enforce-invariants'
-import { honeycombMiddlewareSpans, trace } from '../middleware/honeycomb'
+import { endSpan, startSpan, trace } from '../middleware/honeycomb'
 import { BodyParserDefinition } from '../core/body'
 import { route } from '../middleware/route'
 import { Context } from '../data/context'
@@ -53,16 +53,22 @@ async function buildMiddleware (middleware: MiddlewareConfig[], router: Handler)
     isDev()
     ? (mw: Middleware) => [
       // {% if honeycomb %}
-      honeycombMiddlewareSpans(mw),
+      startSpan(mw),
       // {% endif %}
       dev(mw.name),
-      enforceInvariants()
+      enforceInvariants(),
+      // {% if honeycomb %}
+      endSpan(mw),
+      // {% endif %}
     ]
     : (mw: Middleware) => [
       // {% if honeycomb %}
-      honeycombMiddlewareSpans(mw),
+      startSpan(mw),
       // {% endif %}
-      enforceInvariants()
+      enforceInvariants(),
+      // {% if honeycomb %}
+      endSpan(mw),
+      // {% endif %}
     ]
   )
   const result = middleware.reduce((lhs: Adaptor[], rhs: MiddlewareConfig) => {
@@ -202,8 +208,15 @@ if (require.main === module) {
 
     const spans = getOtelMockSpans(honeycomb.spanProcessor)
 
-    const boltzmannSpans = spans.map(span => {
+    const startTimes: { startTime: number, spanName: string }[] = []
+
+    const spanAttributes = spans.map((span) => {
       const context = span.spanContext()
+
+      startTimes.push({
+        startTime: span.startTime[0] * 1000 + span.startTime[1] / 1000,
+        spanName: span.name
+      })
 
       return {
         spanName: span.name,
@@ -216,74 +229,97 @@ if (require.main === module) {
       }
     })
 
+    startTimes.sort(({startTime: lhs}, {startTime: rhs}) => {
+      if (rhs < lhs) {
+        return 1
+      }
+      if (rhs > lhs) {
+        return -1
+      }
+      return 0
+    })
+
+    const TEST_MIDDLEWARE = 0
+    const ROUTE_MIDDLEWARE = 1
+    const HANDLER = 2
+    const REQUEST = 3
+
     assert.same(
-      boltzmannSpans,
-      [
-        // The handler span
-        {
-          spanName: 'handler: testHandler',
-          serviceName: 'test-app',
-          library: 'boltzmann',
-          traceId: boltzmannSpans[3].traceId,
-          spanId: boltzmannSpans[0].spanId,
-          parentSpanId: boltzmannSpans[1].spanId,
-          // TODO: There *should* be attributes here, no?
-          attributes: {
-            "handler_attribute": "testing 123",
-            "service_name": "test-app",
-            "boltzmann.honeycomb.trace_type": "otel",
-            "boltzmann.http.handler.name": "testHandler",
-            "boltzmann.handler.method": "GET",
-            "boltzmann.handler.route": "/",
-            "boltzmann.http.handler.version": "*",
-            "boltzmann.http.handler.decorators": "",
-          }
-        },
-        // The route middleware span
-        {
-          spanName: 'mw: route',
-          serviceName: 'test-app',
-          library: 'boltzmann',
-          traceId: boltzmannSpans[3].traceId,
-          spanId: boltzmannSpans[1].spanId,
-          parentSpanId: boltzmannSpans[2].spanId,
-          // TODO: There *should* be attributes here, no?
-          attributes: {
-            "service_name": "test-app",
-            "boltzmann.honeycomb.trace_type": "otel",
-          }
-        },
-        // The test middleware span
-        {
-          spanName: 'mw: testMiddleware',
-          serviceName: 'test-app',
-          library: 'boltzmann',
-          traceId: boltzmannSpans[3].traceId,
-          spanId: boltzmannSpans[2].spanId,
-          parentSpanId: boltzmannSpans[3].spanId,
-          // TODO: There *should* be attributes here, no?
-          attributes: {
-            "middleware_attribute": "testing 123",
-            "service_name": "test-app",
-            "boltzmann.honeycomb.trace_type": "otel",
-          }
-        },
-        // The request-level parent span
-        {
-          spanName: 'GET /',
-          serviceName: 'test-app',
-          library: 'boltzmann',
-          traceId: boltzmannSpans[3].traceId,
-          spanId: boltzmannSpans[3].spanId,
-          parentSpanId: undefined,
-          attributes: {
-            "boltzmann.http.query": "",
-            "service_name": "test-app",
-            "boltzmann.honeycomb.trace_type": "otel"
-          }
-        },
-     ],
-      "There are two nested spans, in the same trace, with service name and attributes"
+      startTimes.map(({spanName}) => spanName),
+      ['GET /', 'mw: testMiddleware', 'mw: route', 'handler: testHandler']
+    )
+
+    assert.same(
+      spanAttributes[TEST_MIDDLEWARE],
+      {
+        spanName: 'mw: testMiddleware',
+        serviceName: 'test-app',
+        library: 'boltzmann',
+        traceId: spanAttributes[REQUEST].traceId,
+        spanId: spanAttributes[TEST_MIDDLEWARE].spanId,
+        parentSpanId: spanAttributes[REQUEST].spanId,
+        attributes: {
+          // TODO: This property is getting added to the HTTP span middleware
+          "middleware_attribute": "testing 123",
+          "service_name": "test-app",
+          "honeycomb.trace_type": "otel",
+        }
+      },
+      'the first closed span is the test middleware'
+    )
+    assert.same(
+      spanAttributes[ROUTE_MIDDLEWARE],
+      {
+        spanName: 'mw: route',
+        serviceName: 'test-app',
+        library: 'boltzmann',
+        traceId: spanAttributes[REQUEST].traceId,
+        spanId: spanAttributes[ROUTE_MIDDLEWARE].spanId,
+        parentSpanId: spanAttributes[REQUEST].spanId,
+        attributes: {
+          "service_name": "test-app",
+          "honeycomb.trace_type": "otel",
+        }
+      },
+      'the second closed span is the route middleware'
+    )
+    assert.same(
+      spanAttributes[HANDLER],
+      {
+        spanName: 'handler: testHandler',
+        serviceName: 'test-app',
+        library: 'boltzmann',
+        traceId: spanAttributes[REQUEST].traceId,
+        spanId: spanAttributes[HANDLER].spanId,
+        parentSpanId: spanAttributes[REQUEST].spanId,
+        attributes: {
+          "handler_attribute": "testing 123",
+          "service_name": "test-app",
+          "honeycomb.trace_type": "otel",
+          "boltzmann.http.handler.name": "testHandler",
+          "boltzmann.handler.method": "GET",
+          "boltzmann.handler.route": "/",
+          "boltzmann.http.handler.version": "*",
+          "boltzmann.http.handler.decorators": "",
+        }
+      }
+    )
+    assert.same(
+      spanAttributes[REQUEST],
+      {
+        spanName: 'GET /',
+        serviceName: 'test-app',
+        library: 'boltzmann',
+        traceId: spanAttributes[REQUEST].traceId,
+        spanId: spanAttributes[REQUEST].spanId,
+        parentSpanId: undefined,
+        attributes: {
+          "boltzmann.http.query": "",
+          "service_name": "test-app",
+          "honeycomb.trace_type": "otel"
+        }
+      },
+      'the fourth closed span is the HTTP request span'
     )
   })
 }
